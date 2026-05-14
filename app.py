@@ -1,4 +1,4 @@
-
+app_code = '''
 import os
 import datetime
 import streamlit as st
@@ -69,6 +69,9 @@ with col2:
         help="Enter standard SCHUFA score (100-999). "
              "Higher scores indicate better creditworthiness.")
 
+    # NOTE: SCHUFA is multiplied by 15 to convert from the standard
+    # 100-999 scale to the internal dataset scale of 6,000-15,000.
+    # This scaling factor was derived from the training data distribution.
     schufa = schufa_input * 15
 
     num_applic = st.selectbox(
@@ -102,12 +105,62 @@ st.markdown(
     f"{install_to_inc:.2f}%**")
 st.divider()
 
+# ── PRE-SCREENING RULES ───────────────────────────────────────
+# NOTE: The following rules are NOT part of the statistical model.
+# They are standard banking affordability checks applied BEFORE
+# the application reaches the credit scoring model.
+#
+# In a production system these checks would be applied at the
+# application intake stage by an underwriting system — not by
+# the credit model itself.
+#
+# They are included here because the model was trained on data
+# where instalment ratios do not exceed ~12% at the 99th percentile.
+# Inputs beyond this range are outside the model training distribution
+# and produce unreliable predictions. The pre-screening layer ensures
+# the model only scores applications within its reliable operating range.
+
+monthly_repayment = loan_amount / term_length if term_length > 0 else 0
+
+pre_screen_decline = False
+pre_screen_reason  = ""
+
+if income == 0:
+    pre_screen_decline = True
+    pre_screen_reason  = (
+        "Application rejected — monthly income cannot be zero.")
+
+elif monthly_repayment >= income:
+    pre_screen_decline = True
+    pre_screen_reason  = (
+        f"Application rejected — monthly repayment of "
+        f"€{monthly_repayment:,.0f} equals or exceeds "
+        f"monthly income of €{income:,.0f}. "
+        f"This is a fundamental affordability failure.")
+
+elif install_to_inc > 50:
+    pre_screen_decline = True
+    pre_screen_reason  = (
+        f"Application rejected — instalment-to-income ratio of "
+        f"{install_to_inc:.1f}% exceeds the 50% maximum threshold. "
+        f"Monthly repayment burden is unsustainable.")
+
+# ── Apply winsorisation to match training distribution ────────
+# NOTE: The instalment-to-income ratio is capped at 11.96% before
+# being passed to the model. This matches the winsorisation applied
+# during training where values were capped at the 99th percentile.
+# This prevents the model from extrapolating beyond its training range.
+# This is an ARTIFICIAL adjustment made necessary by the limited range
+# of instalment ratios in the training data (max ~39%, 99th pct ~12%).
+INSTALL_CAP = 11.96  # 99th percentile of training data
+install_to_inc_model = min(install_to_inc, INSTALL_CAP)
+
 # ── Build input dataframe ─────────────────────────────────────
 input_data = pd.DataFrame([{
     "schufa":               schufa,
     "income":               income,
     "term_length":          term_length,
-    "install_to_inc":       install_to_inc,
+    "install_to_inc":       install_to_inc_model,  # winsorised value
     "occup":                occupation,
     "marital":              marital,
     "loan_amount":          loan_amount,
@@ -124,6 +177,22 @@ if st.button("Run Credit Decision",
              type="primary",
              use_container_width=True):
 
+    st.divider()
+
+    # ── Apply pre-screening rules first ──────────────────────
+    if pre_screen_decline:
+        # NOTE: This decline is from the pre-screening layer
+        # not from the statistical model
+        st.error(f"❌ **HARD DECLINE**")
+        st.error(f"**{pre_screen_reason}**")
+        st.warning(
+            "ℹ️ This decision was made by the pre-screening "
+            "affordability rules — not by the credit scoring model. "
+            "The application did not meet the minimum requirements "
+            "to be assessed by the model.")
+        st.stop()
+
+    # ── Model prediction ──────────────────────────────────────
     probability = model.predict_proba(input_data)[0][1]
 
     if probability < APPROVE_THRESHOLD:
@@ -139,8 +208,7 @@ if st.button("Run Credit Decision",
         icon     = "❌"
         message  = "High default risk — auto declined"
 
-    st.divider()
-
+    # ── Decision metrics ──────────────────────────────────────
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Decision", f"{icon} {decision}")
@@ -157,21 +225,23 @@ if st.button("Run Credit Decision",
     st.markdown(f"**{message}**")
     st.divider()
 
+    # ── Threshold explanation ─────────────────────────────────
     st.subheader("Decision Thresholds")
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.info(f"✅ **APPROVE**  \nBelow "
+        st.info(f"✅ **APPROVE**  \\nBelow "
                 f"{APPROVE_THRESHOLD:.0%} default probability")
     with col2:
-        st.warning(f"⚠️ **REFER**  \nBetween "
+        st.warning(f"⚠️ **REFER**  \\nBetween "
                    f"{APPROVE_THRESHOLD:.0%} and "
                    f"{DECLINE_THRESHOLD:.0%}")
     with col3:
-        st.error(f"❌ **DECLINE**  \nAbove "
+        st.error(f"❌ **DECLINE**  \\nAbove "
                  f"{DECLINE_THRESHOLD:.0%} default probability")
 
     st.divider()
 
+    # ── SHAP explanation ──────────────────────────────────────
     st.subheader("Factors Impacting the Decision")
     st.markdown(
         "The factors below show what drove this credit decision "
@@ -214,7 +284,7 @@ if st.button("Run Credit Decision",
         if decision == "APPROVE":
             st.success("### ✅ Reasons for Approval")
         else:
-            st.success("### ✅ Factors in Applicant's Favour")
+            st.success("### ✅ Factors in Applicant\'s Favour")
 
         for _, row in approve_factors.iterrows():
             weight = row["Weight"]
@@ -225,7 +295,7 @@ if st.button("Run Credit Decision",
             else:
                 strength = "⚪ Minor positive"
             st.markdown(
-                f"**{row['Feature']}**  \n"
+                f"**{row[\'Feature\']}**  \\n"
                 f"{strength} — contributes "
                 f"**{weight:.1f}%** of decision weight"
             )
@@ -246,7 +316,7 @@ if st.button("Run Credit Decision",
             else:
                 strength = "🟡 Minor concern"
             st.markdown(
-                f"**{row['Feature']}**  \n"
+                f"**{row[\'Feature\']}**  \\n"
                 f"{strength} — contributes "
                 f"**{weight:.1f}%** of decision weight"
             )
@@ -263,8 +333,8 @@ if st.button("Run Credit Decision",
         st.success(
             f"**Decision Summary:** This application was automatically "
             f"approved. The strongest positive factor was "
-            f"**{top_approve['Feature']}** which accounted for "
-            f"{top_approve['Weight']:.1f}% of the model's decision. "
+            f"**{top_approve[\'Feature\']}** which accounted for "
+            f"{top_approve[\'Weight\']:.1f}% of the model\'s decision. "
             f"The predicted probability of default is "
             f"**{probability:.1%}** — below the approval "
             f"threshold of {APPROVE_THRESHOLD:.0%}."
@@ -274,9 +344,9 @@ if st.button("Run Credit Decision",
             f"**Decision Summary:** This application has been referred "
             f"for manual underwriter review. The model identified mixed "
             f"signals — positive factors include "
-            f"**{top_approve['Feature'] if top_approve is not None else 'N/A'}** "
+            f"**{top_approve[\'Feature\'] if top_approve is not None else \'N/A\'}** "
             f"but concerns around "
-            f"**{top_decline['Feature'] if top_decline is not None else 'N/A'}** "
+            f"**{top_decline[\'Feature\'] if top_decline is not None else \'N/A\'}** "
             f"mean the decision requires human judgement. "
             f"Predicted default probability: **{probability:.1%}**."
         )
@@ -284,8 +354,8 @@ if st.button("Run Credit Decision",
         st.error(
             f"**Decision Summary:** This application was automatically "
             f"declined. The primary concern was "
-            f"**{top_decline['Feature']}** which accounted for "
-            f"{top_decline['Weight']:.1f}% of the model's decision. "
+            f"**{top_decline[\'Feature\']}** which accounted for "
+            f"{top_decline[\'Weight\']:.1f}% of the model\'s decision. "
             f"The predicted probability of default is "
             f"**{probability:.1%}** — above the decline threshold "
             f"of {DECLINE_THRESHOLD:.0%}."
@@ -321,36 +391,13 @@ if st.button("Run Credit Decision",
         ]
     })
     st.dataframe(summary, use_container_width=True, hide_index=True)
+'''
 
-# Post run Fix -- Schufa extreme weight
+with open("app.py", "w") as f:
+    f.write(app_code)
 
-# ── Input validation ──────────────────────────────────────────
-warnings_list = []
+print("✓ app.py created")
 
-if install_to_inc > 100:
-    warnings_list.append(
-        f"⚠️ Instalment ratio of {install_to_inc:.1f}% is extremely high — "
-        f"monthly repayment exceeds monthly income")
-
-if loan_amount > income * term_length:
-    warnings_list.append(
-        f"⚠️ Loan amount exceeds total income over term length")
-
-if income < 500:
-    warnings_list.append(
-        f"⚠️ Income of €{income} per month is below minimum threshold")
-
-if warnings_list:
-    for w in warnings_list:
-        st.warning(w)
-    st.error("❌ This application cannot be processed — "
-             "Please review the inputs above")
-    st.stop()
-
-# Hard decline rules regardless of model output
-if install_to_inc > 50:
-    decision = "DECLINE"
-    icon     = "❌"
-    message  = "Hard decline — instalment ratio exceeds 50% of income"
-    probability = 1.0
+from google.colab import files
+files.download("app.py")
 
