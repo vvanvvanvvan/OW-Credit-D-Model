@@ -321,3 +321,36 @@ if st.button("Run Credit Decision",
         ]
     })
     st.dataframe(summary, use_container_width=True, hide_index=True)
+
+# Post run Fix -- Schufa extreme weight
+
+# ── Input validation ──────────────────────────────────────────
+warnings_list = []
+
+if install_to_inc > 100:
+    warnings_list.append(
+        f"⚠️ Instalment ratio of {install_to_inc:.1f}% is extremely high — "
+        f"monthly repayment exceeds monthly income")
+
+if loan_amount > income * term_length:
+    warnings_list.append(
+        f"⚠️ Loan amount exceeds total income over term length")
+
+if income < 500:
+    warnings_list.append(
+        f"⚠️ Income of €{income} per month is below minimum threshold")
+
+if warnings_list:
+    for w in warnings_list:
+        st.warning(w)
+    st.error("❌ This application cannot be processed — "
+             "Please review the inputs above")
+    st.stop()
+
+# Hard decline rules regardless of model output
+if install_to_inc > 50:
+    decision = "DECLINE"
+    icon     = "❌"
+    message  = "Hard decline — instalment ratio exceeds 50% of income"
+    probability = 1.0
+
